@@ -1,0 +1,587 @@
+version: '3.8'
+
+services:
+  # Main Dashboard Application
+  azure-ai-dashboard:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: azure-ai-dashboard
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      # Azure Configuration
+      - AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+      - AZURE_RESOURCE_GROUP_NAME=${AZURE_RESOURCE_GROUP_NAME}
+      - AZURE_REGION=${AZURE_REGION:-westeurope}
+      
+      # Application Configuration
+      - NODE_ENV=production
+      - PORT=3001
+      - AUTO_REFRESH_SECONDS=${AUTO_REFRESH_SECONDS:-30}
+      - CACHE_DURATION_MINUTES=${CACHE_DURATION_MINUTES:-5}
+      - ENABLE_WEBSOCKET=${ENABLE_WEBSOCKET:-true}
+      
+      # Monitoring
+      - ENABLE_METRICS=true
+      - METRICS_PORT=9090
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      
+    volumes:
+      - dashboard-logs:/app/logs
+      - dashboard-cache:/app/cache
+    
+    networks:
+      - dashboard-network
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    depends_on:
+      - redis
+      - prometheus
+
+  # Redis for Caching
+  redis:
+    image: redis:7-alpine
+    container_name: dashboard-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-dashboard123}
+    volumes:
+      - redis-data:/data
+    networks:
+      - dashboard-network
+    
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Prometheus for Metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: dashboard-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - dashboard-network
+
+  # Grafana for Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: dashboard-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-dashboard123}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - dashboard-network
+    depends_on:
+      - prometheus
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: dashboard-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+      - nginx-logs:/var/log/nginx
+    networks:
+      - dashboard-network
+    depends_on:
+      - azure-ai-dashboard
+      - grafana
+
+  # Log Aggregator
+  fluentd:
+    build: 
+      context: ./monitoring/fluentd
+      dockerfile: Dockerfile
+    container_name: dashboard-fluentd
+    restart: unless-stopped
+    volumes:
+      - dashboard-logs:/fluentd/log
+      - ./monitoring/fluentd/fluent.conf:/fluentd/etc/fluent.conf
+    networks:
+      - dashboard-network
+
+volumes:
+  dashboard-logs:
+    driver: local
+  dashboard-cache:
+    driver: local
+  redis-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  nginx-logs:
+    driver: local
+
+networks:
+  dashboard-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+
+---
+# Dockerfile
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+
+# Install dependencies
+COPY package*.json ./
+RUN npm ci --only=production && npm cache clean --force
+
+# Copy application files
+COPY . .
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S dashboard -u 1001
+
+# Set permissions
+RUN chown -R dashboard:nodejs /app
+USER dashboard
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node healthcheck.js
+
+EXPOSE 3001
+
+CMD ["npm", "start"]
+
+---
+# nginx/nginx.conf
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream dashboard {
+        server azure-ai-dashboard:3001;
+    }
+
+    upstream grafana {
+        server grafana:3000;
+    }
+
+    # Rate limiting
+    limit_req_zone $binary_remote_addr zone=dashboard_limit:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=5r/s;
+
+    server {
+        listen 80;
+        server_name localhost;
+
+        # Security headers
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' cdnjs.cloudflare.com; connect-src 'self' wss:;" always;
+
+        # Main dashboard
+        location / {
+            limit_req zone=dashboard_limit burst=20 nodelay;
+            proxy_pass http://dashboard;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection 'upgrade';
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache_bypass $http_upgrade;
+        }
+
+        # API routes
+        location /api/ {
+            limit_req zone=api_limit burst=10 nodelay;
+            proxy_pass http://dashboard;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # WebSocket support
+        location /ws {
+            proxy_pass http://dashboard;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+        }
+
+        # Grafana monitoring
+        location /monitoring/ {
+            auth_basic "Monitoring Access";
+            auth_basic_user_file /etc/nginx/.htpasswd;
+            proxy_pass http://grafana/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        # Static files caching
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+            proxy_pass http://dashboard;
+        }
+    }
+}
+
+---
+# monitoring/prometheus.yml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "alert_rules.yml"
+
+scrape_configs:
+  - job_name: 'azure-ai-dashboard'
+    static_configs:
+      - targets: ['azure-ai-dashboard:9090']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+---
+# monitoring/alert_rules.yml
+groups:
+  - name: dashboard_alerts
+    rules:
+      - alert: DashboardDown
+        expr: up{job="azure-ai-dashboard"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Azure AI Dashboard is down"
+          description: "Dashboard has been down for more than 1 minute"
+
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value }} errors per second"
+
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 0.5
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High latency detected"
+          description: "95th percentile latency is {{ $value }}s"
+
+      - alert: AzureAPIFailure
+        expr: azure_api_failures_total > 10
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Azure API failures"
+          description: "Azure API has failed {{ $value }} times"
+
+---
+# monitoring/grafana/datasources/prometheus.yml
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+---
+# healthcheck.js
+const http = require('http');
+
+const options = {
+  hostname: 'localhost',
+  port: 3001,
+  path: '/api/health',
+  method: 'GET',
+  timeout: 3000
+};
+
+const req = http.request(options, (res) => {
+  if (res.statusCode === 200) {
+    process.exit(0);
+  } else {
+    console.error(`Health check failed with status: ${res.statusCode}`);
+    process.exit(1);
+  }
+});
+
+req.on('error', (err) => {
+  console.error(`Health check failed: ${err.message}`);
+  process.exit(1);
+});
+
+req.on('timeout', () => {
+  console.error('Health check timeout');
+  req.destroy();
+  process.exit(1);
+});
+
+req.end();
+
+---
+# .env.example
+# Azure Authentication (Required)
+AZURE_SUBSCRIPTION_ID=your-subscription-id-here
+AZURE_TENANT_ID=your-tenant-id-here
+AZURE_CLIENT_ID=your-client-id-here
+AZURE_CLIENT_SECRET=your-client-secret-here
+
+# Azure Configuration
+AZURE_RESOURCE_GROUP_NAME=your-resource-group
+AZURE_REGION=westeurope
+
+# Application Settings
+NODE_ENV=production
+PORT=3001
+LOG_LEVEL=info
+
+# Dashboard Configuration
+AUTO_REFRESH_SECONDS=30
+CACHE_DURATION_MINUTES=5
+ENABLE_WEBSOCKET=true
+ENABLE_METRICS=true
+
+# Security
+REDIS_PASSWORD=your-redis-password
+GRAFANA_USER=admin
+GRAFANA_PASSWORD=your-grafana-password
+
+# Optional: Slack/Teams Notifications
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+TEAMS_WEBHOOK_URL=https://outlook.office.com/webhook/...
+
+---
+# scripts/deploy.sh
+#!/bin/bash
+
+# Azure AI Dashboard Deployment Script
+
+set -e
+
+echo "🚀 Starting Azure AI Dashboard deployment..."
+
+# Check if .env file exists
+if [ ! -f .env ]; then
+    echo "❌ .env file not found. Please copy .env.example to .env and configure it."
+    exit 1
+fi
+
+# Load environment variables
+source .env
+
+# Validate required environment variables
+required_vars=(
+    "AZURE_SUBSCRIPTION_ID"
+    "AZURE_TENANT_ID" 
+    "AZURE_CLIENT_ID"
+    "AZURE_CLIENT_SECRET"
+)
+
+for var in "${required_vars[@]}"; do
+    if [ -z "${!var}" ]; then
+        echo "❌ Required environment variable $var is not set"
+        exit 1
+    fi
+done
+
+echo "✅ Environment variables validated"
+
+# Create necessary directories
+mkdir -p logs cache monitoring/grafana/dashboards monitoring/grafana/datasources
+
+# Pull latest images
+echo "📥 Pulling latest Docker images..."
+docker-compose pull
+
+# Build application image
+echo "🔨 Building application..."
+docker-compose build
+
+# Start services
+echo "🚀 Starting services..."
+docker-compose up -d
+
+# Wait for services to be healthy
+echo "⏳ Waiting for services to be healthy..."
+sleep 30
+
+# Check health
+echo "🔍 Checking service health..."
+docker-compose ps
+
+# Test endpoints
+echo "🧪 Testing endpoints..."
+curl -f http://localhost:3001/api/health || {
+    echo "❌ Health check failed"
+    docker-compose logs azure-ai-dashboard
+    exit 1
+}
+
+echo "✅ Deployment completed successfully!"
+echo ""
+echo "📊 Dashboard: http://localhost:3001"
+echo "📈 Monitoring: http://localhost:3000 (admin/dashboard123)"
+echo "📋 Logs: docker-compose logs -f azure-ai-dashboard"
+echo ""
+
+---
+# scripts/backup.sh
+#!/bin/bash
+
+# Backup script for dashboard data
+
+BACKUP_DIR="/backups/azure-ai-dashboard"
+DATE=$(date +%Y%m%d_%H%M%S)
+
+echo "🔄 Starting backup process..."
+
+# Create backup directory
+mkdir -p "$BACKUP_DIR/$DATE"
+
+# Backup Redis data
+echo "💾 Backing up Redis data..."
+docker exec dashboard-redis redis-cli --rdb /data/backup.rdb
+docker cp dashboard-redis:/data/backup.rdb "$BACKUP_DIR/$DATE/redis-backup.rdb"
+
+# Backup Grafana data
+echo "📈 Backing up Grafana data..."
+docker exec dashboard-grafana tar czf /tmp/grafana-backup.tar.gz /var/lib/grafana
+docker cp dashboard-grafana:/tmp/grafana-backup.tar.gz "$BACKUP_DIR/$DATE/"
+
+# Backup application logs
+echo "📋 Backing up logs..."
+docker cp dashboard-logs "$BACKUP_DIR/$DATE/logs"
+
+# Create backup metadata
+cat > "$BACKUP_DIR/$DATE/metadata.json" <<EOF
+{
+  "timestamp": "$DATE",
+  "version": "$(git rev-parse HEAD 2>/dev/null || echo 'unknown')",
+  "services": $(docker-compose ps --services | jq -R -s -c 'split("\n")[:-1]')
+}
+EOF
+
+# Compress backup
+echo "🗜️ Compressing backup..."
+tar czf "$BACKUP_DIR/dashboard-backup-$DATE.tar.gz" -C "$BACKUP_DIR" "$DATE"
+rm -rf "$BACKUP_DIR/$DATE"
+
+# Cleanup old backups (keep last 7 days)
+find "$BACKUP_DIR" -name "dashboard-backup-*.tar.gz" -mtime +7 -delete
+
+echo "✅ Backup completed: $BACKUP_DIR/dashboard-backup-$DATE.tar.gz"
+
+---
+# Makefile
+.PHONY: help install start stop restart logs build deploy backup clean test
+
+help: ## Show this help message
+	@echo 'Azure AI Dashboard - Available Commands:'
+	@echo ''
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
+
+install: ## Install dependencies and setup project
+	npm install
+	cp .env.example .env
+	@echo "✅ Setup complete! Please edit .env with your Azure credentials."
+
+start: ## Start the dashboard in development mode  
+	npm run dev
+
+build: ## Build Docker containers
+	docker-compose build
+
+deploy: ## Deploy dashboard with Docker Compose
+	./scripts/deploy.sh
+
+stop: ## Stop all services
+	docker-compose down
+
+restart: ## Restart all services
+	docker-compose restart
+
+logs: ## Show application logs
+	docker-compose logs -f azure-ai-dashboard
+
+backup: ## Create backup of dashboard data
+	./scripts/backup.sh
+
+clean: ## Clean up containers and volumes
+	docker-compose down -v
+	docker system prune -f
+
+test: ## Run tests
+	npm test
+	./scripts/test-endpoints.sh
+
+status: ## Show service status
+	docker-compose ps

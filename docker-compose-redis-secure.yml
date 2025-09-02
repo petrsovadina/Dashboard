@@ -1,0 +1,159 @@
+# Enhanced Redis Configuration for Production
+# Replace the Redis service in your main docker-compose.yml with this configuration
+
+services:
+  # Enhanced Redis with Security & Performance
+  redis:
+    image: redis:7-alpine
+    container_name: dashboard-redis
+    restart: unless-stopped
+    
+    # DO NOT expose Redis port to host in production
+    # ports:
+    #   - "6379:6379"  # REMOVE THIS IN PRODUCTION
+    
+    # Use custom Redis configuration
+    command: >
+      sh -c "
+      redis-server /usr/local/etc/redis/redis.conf
+      --requirepass $${REDIS_PASSWORD}
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --slowlog-log-slower-than 10000
+      --latency-monitor-threshold 100
+      --hz 10
+      --timeout 300
+      --tcp-keepalive 300
+      "
+    
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_MAXMEMORY=${REDIS_MAXMEMORY:-512mb}
+    
+    volumes:
+      - redis-data:/data
+      - redis-config:/usr/local/etc/redis
+      - ./redis/redis-production.conf:/usr/local/etc/redis/redis.conf:ro
+      - /dev/shm:/dev/shm  # Shared memory for performance
+    
+    # Resource limits for production
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    
+    # Security context
+    user: "999:999"  # redis user
+    
+    # Network isolation
+    networks:
+      - dashboard-network
+    
+    # Enhanced health check
+    healthcheck:
+      test: |
+        sh -c "
+        if [ -n \"$$REDIS_PASSWORD\" ]; then
+          redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping
+        else
+          redis-cli ping
+        fi
+        "
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # System limits and security
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    
+    # Logging configuration  
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  # Redis Sentinel for High Availability (Optional)
+  redis-sentinel:
+    image: redis:7-alpine
+    container_name: dashboard-redis-sentinel
+    restart: unless-stopped
+    
+    command: >
+      sh -c "
+      echo 'port 26379' > /tmp/sentinel.conf &&
+      echo 'dir /tmp' >> /tmp/sentinel.conf &&
+      echo 'sentinel monitor mymaster redis 6379 1' >> /tmp/sentinel.conf &&
+      echo 'sentinel down-after-milliseconds mymaster 5000' >> /tmp/sentinel.conf &&
+      echo 'sentinel parallel-syncs mymaster 1' >> /tmp/sentinel.conf &&
+      echo 'sentinel failover-timeout mymaster 10000' >> /tmp/sentinel.conf &&
+      echo 'sentinel auth-pass mymaster $${REDIS_PASSWORD}' >> /tmp/sentinel.conf &&
+      redis-sentinel /tmp/sentinel.conf
+      "
+    
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    
+    networks:
+      - dashboard-network
+    
+    depends_on:
+      - redis
+
+  # Redis Exporter for Monitoring
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: dashboard-redis-exporter
+    restart: unless-stopped
+    
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_EXPORTER_LOG_FORMAT=txt
+    
+    ports:
+      - "9121:9121"  # Prometheus metrics
+    
+    networks:
+      - dashboard-network
+    
+    depends_on:
+      - redis
+
+volumes:
+  redis-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/redis-data
+  
+  redis-config:
+    driver: local
+
+networks:
+  dashboard-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
