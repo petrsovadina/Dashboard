@@ -23,16 +23,13 @@ services:
       - NODE_ENV=production
       - PORT=3001
       - AUTO_REFRESH_SECONDS=${AUTO_REFRESH_SECONDS:-30}
-      - CACHE_DURATION_MINUTES=${CACHE_DURATION_MINUTES:-5}
       - ENABLE_WEBSOCKET=${ENABLE_WEBSOCKET:-true}
       
       # Security
-      - API_SECRET_KEY=${API_SECRET_KEY}
+      - API_KEY=${API_KEY}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
       
-      # Monitoring
-      - ENABLE_METRICS=true
-      - METRICS_PORT=9090
+      # Logging
       - LOG_LEVEL=${LOG_LEVEL:-info}
       
     volumes:

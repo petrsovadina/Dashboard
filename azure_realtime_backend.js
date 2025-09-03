@@ -244,45 +244,67 @@ class RateLimitManager {
       '::1',
       ...(process.env.IP_WHITELIST ? process.env.IP_WHITELIST.split(',') : [])
     ]);
+    // Track keys for which we've already emitted a warning within the current window
+    // This replicates the old `onLimitReached` semantics (fire once per key per window)
+    this._limitWarnings = new Map(); // key -> timeoutId
   }
 
   createLimiter(windowMs, max, message, skipWhitelisted = true) {
+    const self = this;
     return rateLimit({
       windowMs,
       max,
       standardHeaders: true,
       legacyHeaders: false,
+  // Disable the removed `onLimitReached` validation to avoid ChangeWarning
+  validate: { onLimitReached: false },
       keyGenerator: (req) => {
         // Use combination of IP and User-Agent for better uniqueness
         return `${req.ip}_${crypto.createHash('md5').update(req.get('User-Agent') || '').digest('hex').substring(0, 8)}`;
       },
       skip: (req) => {
-        if (skipWhitelisted && this.whitelist.has(req.ip)) {
+        if (skipWhitelisted && self.whitelist.has(req.ip)) {
           return true;
         }
         // Skip rate limiting for health checks
         return req.path === '/api/health';
       },
       handler: (req, res) => {
-        logger.audit('RATE_LIMIT_EXCEEDED', {
-          ip: req.ip,
-          userAgent: req.get('User-Agent'),
-          endpoint: req.path,
-          method: req.method
-        });
-        res.status(429).json({
-          success: false,
-          error: message,
-          retryAfter: Math.ceil(windowMs / 1000),
-          timestamp: new Date().toISOString()
-        });
-      },
-      onLimitReached: (req) => {
-        logger.warn('Rate limit threshold reached', {
-          ip: req.ip,
-          endpoint: req.path,
-          remaining: 0
-        });
+        try {
+          // replicate a one-time-per-window warning similar to old `onLimitReached`
+          const key = `${req.ip}_${crypto.createHash('md5').update(req.get('User-Agent') || '').digest('hex').substring(0, 8)}`;
+          if (!self._limitWarnings.has(key)) {
+            // mark warned and clear after the window expires
+            const timeoutId = setTimeout(() => {
+              self._limitWarnings.delete(key);
+            }, windowMs);
+            self._limitWarnings.set(key, timeoutId);
+
+            logger.warn('Rate limit threshold reached', {
+              ip: req.ip,
+              endpoint: req.path,
+              remaining: 0
+            });
+          }
+
+          logger.audit('RATE_LIMIT_EXCEEDED', {
+            ip: req.ip,
+            userAgent: req.get('User-Agent'),
+            endpoint: req.path,
+            method: req.method
+          });
+
+          res.status(429).json({
+            success: false,
+            error: message,
+            retryAfter: Math.ceil(windowMs / 1000),
+            timestamp: new Date().toISOString()
+          });
+        } catch (err) {
+          // Defensive: ensure rate limiter does not crash the app
+          logger.error('Rate limiter handler error', { error: err && err.message });
+          res.status(429).json({ success: false, error: message });
+        }
       }
     });
   }
@@ -1576,6 +1598,61 @@ const config = {
 // Start secure server
 const server = new AzureAIRealtimeServer(config);
 server.start();
+*/
+
+// AUTO-START SERVER IF RUNNING DIRECTLY
+if (require.main === module) {
+  require('dotenv').config();
+
+  // Check for required environment variables
+  const requiredEnvVars = ['AZURE_SUBSCRIPTION_ID', 'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET'];
+  const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+  
+  if (missingVars.length > 0) {
+    console.error('❌ Missing required environment variables:');
+    missingVars.forEach(varName => console.error(`   - ${varName}`));
+    console.error('\n📝 Please create a .env file with your Azure credentials.');
+    console.error('   See .env file for template with required variables.\n');
+    process.exit(1);
+  }
+
+  // Secure configuration with all security features
+  const config = {
+    // Required Azure credentials
+    subscriptionId: process.env.AZURE_SUBSCRIPTION_ID,
+    tenantId: process.env.AZURE_TENANT_ID,
+    clientId: process.env.AZURE_CLIENT_ID,
+    clientSecret: process.env.AZURE_CLIENT_SECRET,
+    
+    // Optional configuration
+    resourceGroup: process.env.AZURE_RESOURCE_GROUP_NAME,
+    region: process.env.AZURE_REGION || 'westeurope',
+    port: parseInt(process.env.PORT) || 3001,
+    
+    // Security configuration
+    apiKey: process.env.API_KEY, // Generate with: crypto.randomBytes(32).toString('hex')
+    corsOrigins: process.env.CORS_ORIGINS ? 
+      process.env.CORS_ORIGINS.split(',') : 
+      ['http://localhost:3000', 'http://localhost:3001'],
+    
+    // Performance configuration
+    enableWebSocket: process.env.ENABLE_WEBSOCKET !== 'false',
+    autoRefreshSeconds: parseInt(process.env.AUTO_REFRESH_SECONDS) || 30,
+    logLevel: process.env.LOG_LEVEL || 'info'
+  };
+
+  console.log('Config created, starting server...');
+  
+  try {
+    // Start secure server
+    const server = new AzureAIRealtimeServer(config);
+    server.start();
+    console.log('Server start method called');
+  } catch (error) {
+    console.error('Error starting server:', error);
+    process.exit(1);
+  }
+}
 
 // Environment variables required in .env file:
 // AZURE_SUBSCRIPTION_ID=your-subscription-id
@@ -1587,18 +1664,15 @@ server.start();
 // PORT=3001
 // NODE_ENV=production
 // LOG_LEVEL=info
-*/
 
 // Production deployment checklist:
-/*
-1. Set NODE_ENV=production
-2. Generate strong API_KEY (32+ characters)
-3. Configure CORS_ORIGINS for your domains
-4. Set appropriate LOG_LEVEL (info or warn for production)
-5. Use HTTPS in production with reverse proxy
-6. Monitor logs/error.log and logs/combined.log
-7. Set up log rotation
-8. Configure firewall rules
-9. Use environment-specific .env files
-10. Enable monitoring and alerting
-*/
+// 1. Set NODE_ENV=production
+// 2. Generate strong API_KEY (32+ characters)
+// 3. Configure CORS_ORIGINS for your domains
+// 4. Set appropriate LOG_LEVEL (info or warn for production)
+// 5. Use HTTPS in production with reverse proxy
+// 6. Monitor logs/error.log and logs/combined.log
+// 7. Set up log rotation
+// 8. Configure firewall rules
+// 9. Use environment-specific .env files
+// 10. Enable monitoring and alerting
