@@ -1,13 +1,21 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell, Area, AreaChart } from 'recharts';
-import { Settings, Eye, EyeOff, RefreshCw, DollarSign, Activity, TrendingUp, Zap, AlertCircle, CheckCircle, Lock, Unlock, Globe } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Area, AreaChart } from 'recharts';
+import { Settings, Eye, EyeOff, RefreshCw, DollarSign, Activity, TrendingUp, Zap, AlertCircle, CheckCircle, Globe } from 'lucide-react';
+import {
+  AzureConfig,
+  DashboardData,
+  ConnectionStatus,
+  Currency,
+  ModelData,
+  HourlyDataPoint
+} from './src/types/dashboard';
 
-const AzureAIRealtimeDashboard = () => {
+const AzureAIRealtimeDashboard: React.FC = () => {
   // State pro autentifikaci a konfiguraci
-  const [isConfigured, setIsConfigured] = useState(false);
-  const [showConfig, setShowConfig] = useState(false);
-  const [showSecrets, setShowSecrets] = useState(false);
-  const [config, setConfig] = useState({
+  const [isConfigured, setIsConfigured] = useState<boolean>(false);
+  const [showConfig, setShowConfig] = useState<boolean>(false);
+  const [showSecrets, setShowSecrets] = useState<boolean>(false);
+  const [config, setConfig] = useState<AzureConfig>({
     subscriptionId: '',
     tenantId: '',
     clientId: '',
@@ -17,22 +25,22 @@ const AzureAIRealtimeDashboard = () => {
   });
 
   // State pro dashboard data
-  const [dashboardData, setDashboardData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [lastUpdate, setLastUpdate] = useState(null);
-  const [connectionStatus, setConnectionStatus] = useState('disconnected');
+  const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
 
   // State pro CZK konverzi
-  const [exchangeRate, setExchangeRate] = useState(24.5); // USD to CZK
-  const [showCZK, setShowCZK] = useState(true);
+  const [exchangeRate, setExchangeRate] = useState<number>(24.5); // USD to CZK
+  const [showCZK, setShowCZK] = useState<boolean>(true);
 
   // Auto-refresh interval
-  const [autoRefresh, setAutoRefresh] = useState(true);
-  const [refreshInterval, setRefreshInterval] = useState(30); // seconds
+  const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
+  const [refreshInterval, setRefreshInterval] = useState<number>(30); // seconds
 
   // Mock data pro demonstraci (real implementace by používala Azure APIs)
-  const mockRealTimeData = {
+  const mockRealTimeData: DashboardData = {
     models: [
       {
         name: 'gpt-4o',
@@ -113,8 +121,8 @@ const AzureAIRealtimeDashboard = () => {
       // V reálné aplikaci by to byl externí API
       const mockRate = 24.5 + (Math.random() - 0.5) * 0.5;
       setExchangeRate(mockRate);
-    } catch (error) {
-      console.error('Exchange rate fetch error:', error);
+    } catch (err) {
+      console.error('Exchange rate fetch error:', err);
     }
   }, []);
 
@@ -150,8 +158,9 @@ const AzureAIRealtimeDashboard = () => {
       setLastUpdate(new Date());
       setConnectionStatus('connected');
 
-    } catch (error) {
-      setError(error.message);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Neznámá chyba při načítání dat';
+      setError(errorMessage);
       setConnectionStatus('error');
     } finally {
       setLoading(false);
@@ -181,8 +190,8 @@ const AzureAIRealtimeDashboard = () => {
   }, [isConfigured, fetchDashboardData]);
 
   // Konfigurace dashboard
-  const handleConfigSave = () => {
-    const requiredFields = ['subscriptionId', 'tenantId', 'clientId', 'clientSecret'];
+  const handleConfigSave = (): void => {
+    const requiredFields = ['subscriptionId', 'tenantId', 'clientId', 'clientSecret'] as const;
     const hasAllRequired = requiredFields.every(field => config[field].trim());
 
     if (!hasAllRequired) {
@@ -196,7 +205,7 @@ const AzureAIRealtimeDashboard = () => {
   };
 
   // Utility funkce
-  const formatPrice = (price, toCZK = false) => {
+  const formatPrice = (price: number, toCZK: boolean = false): string => {
     const value = toCZK ? price * exchangeRate : price;
     const currency = toCZK ? 'CZK' : 'USD';
     
@@ -206,19 +215,19 @@ const AzureAIRealtimeDashboard = () => {
     return `${value.toFixed(4)} ${currency}`;
   };
 
-  const formatCost = (cost, toCZK = false) => {
+  const formatCost = (cost: number, toCZK: boolean = false): string => {
     const value = toCZK ? cost * exchangeRate : cost;
     const currency = toCZK ? 'CZK' : 'USD';
     return `${value.toFixed(2)} ${currency}`;
   };
 
-  const formatNumber = (num) => {
+  const formatNumber = (num: number): string => {
     if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
     if (num >= 1000) return `${(num / 1000).toFixed(1)}K`;
     return num.toLocaleString();
   };
 
-  const getStatusColor = (status) => {
+  const getStatusColor = (status: ConnectionStatus): string => {
     switch (status) {
       case 'connected': return 'text-green-600 bg-green-100';
       case 'connecting': return 'text-yellow-600 bg-yellow-100';
@@ -506,7 +515,7 @@ const AzureAIRealtimeDashboard = () => {
 
             {/* Models Overview */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-              {dashboardData.models.map((model) => (
+              {dashboardData.models.map((model: ModelData) => (
                 <div key={model.name} className="bg-white rounded-lg shadow p-6">
                   <div className="flex justify-between items-center mb-4">
                     <h3 className="text-lg font-semibold text-gray-900">{model.name}</h3>
@@ -626,11 +635,11 @@ const AzureAIRealtimeDashboard = () => {
                       fill="#8884d8"
                       dataKey="value"
                     >
-                      {dashboardData.models.map((entry, index) => (
+                      {dashboardData.models.map((_entry, index) => (
                         <Cell key={`cell-${index}`} fill={['#3b82f6', '#10b981', '#f59e0b'][index % 3]} />
                       ))}
                     </Pie>
-                    <Tooltip formatter={(value) => formatCost(value, showCZK)} />
+                    <Tooltip formatter={(value: number) => formatCost(value, showCZK)} />
                   </PieChart>
                 </ResponsiveContainer>
               </div>

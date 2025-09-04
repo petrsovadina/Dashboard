@@ -1,11 +1,12 @@
-# 🚀 Azure AI Real-time Pricing Dashboard
+# Azure AI Real-time Dashboard 🚀
 
-> Kompletní real-time dashboard pro monitoring cen tokenů a usage Azure AI modelů s podporou CZK konverze, autentifikace a WebSocket aktualizací.
+> Kompletní real-time dashboard pro monitoring nákladů a využití Azure AI modelů s podporou CZK konverze, autentifikace a WebSocket aktualizací.
 
-![Dashboard Preview](https://img.shields.io/badge/Status-Production_Ready-green)
-![Azure](https://img.shields.io/badge/Azure-OpenAI_Service-blue)
-![Node.js](https://img.shields.io/badge/Node.js-18+-green)
-![Docker](https://img.shields.io/badge/Docker-Supported-blue)
+[![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=flat-square&logo=typescript&logoColor=white)](https://typescriptlang.org/)
+[![React](https://img.shields.io/badge/React-20232A?style=flat-square&logo=react&logoColor=61DAFB)](https://reactjs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-43853D?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)](https://docker.com/)
+[![Security](https://img.shields.io/badge/Security-Enterprise_Grade-green?style=flat-square)](https://github.com/petrsovadina/Dashboard)
 
 ## 🎯 Funkce dashboardu
 
